@@ -56,7 +56,7 @@ def get_model_type(model):
 
 
 def get_model_config(model):
-    return get_attr_wrapped_model(model, 'config', allow_none=False)
+    return get_attr_wrapped_model(model, 'megatron_config', allow_none=False)
 
 
 class GlobalMemoryBuffer:
