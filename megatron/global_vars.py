@@ -21,11 +21,48 @@ _GLOBAL_ADLR_AUTORESUME = None
 _GLOBAL_TIMERS = None
 _GLOBAL_SIGNAL_HANDLER = None
 
-def get_args():
+DEFAULT_NAMESPACE = 'default'
+import contextlib
+
+@contextlib.contextmanager
+def fork_args_namespace(namespace):
+    """
+    Usage example:
+        update_args('vit', vit_config)
+        with fork_args_namespace('vit'):
+            do vit stuff here
+    """
+    # Check if we have added the args namespace
+    if namespace not in _GLOBAL_ARGS:
+        raise Exception('args namespace {} is not added'.format(namespace))
+    # Store current args namespace.
+    tmp = _GLOBAL_ARGS[DEFAULT_NAMESPACE]
+    # Set args namespace to the desired one
+    _GLOBAL_ARGS[DEFAULT_NAMESPACE] = _GLOBAL_ARGS[namespace]
+    # Do the stuff we wanted to do.
+    try:
+        yield
+    finally:
+        _GLOBAL_ARGS[DEFAULT_NAMESPACE] = tmp
+
+def get_args(namespace=DEFAULT_NAMESPACE):
     """Return arguments."""
     _ensure_var_is_initialized(_GLOBAL_ARGS, 'args')
-    return _GLOBAL_ARGS
+    return _GLOBAL_ARGS[namespace]
 
+def set_args(args):
+    global _GLOBAL_ARGS
+    if _GLOBAL_ARGS is None:
+        _GLOBAL_ARGS = {}
+    _GLOBAL_ARGS[DEFAULT_NAMESPACE] = args
+
+def update_args(namespace, args):
+    _ensure_var_is_initialized(_GLOBAL_ARGS, 'args')
+    if namespace not in _GLOBAL_ARGS:
+        import copy
+        _GLOBAL_ARGS[namespace] = copy.deepcopy(_GLOBAL_ARGS[DEFAULT_NAMESPACE])
+    for k, v in args.items():
+        setattr(_GLOBAL_ARGS[namespace], k, v)
 
 def get_retro_args():
     """Return retro arguments."""
@@ -87,7 +124,7 @@ def _set_signal_handler():
 
 
 
-def set_global_variables(args, build_tokenizer=True):
+def set_global_variables(args):
     """Set args, tokenizer, tensorboard-writer, adlr-autoresume, and timers."""
 
     assert args is not None
@@ -96,7 +133,7 @@ def set_global_variables(args, build_tokenizer=True):
     set_args(args)
 
     _build_num_microbatches_calculator(args)
-    if build_tokenizer:
+    if args.vocab_file:
         _ = _build_tokenizer(args)
     _set_tensorboard_writer(args)
     _set_wandb_writer(args)
@@ -105,11 +142,6 @@ def set_global_variables(args, build_tokenizer=True):
 
     if args.exit_signal_handler:
         _set_signal_handler()
-
-
-def set_args(args):
-    global _GLOBAL_ARGS
-    _GLOBAL_ARGS = args
 
 
 def set_retro_args(retro_args):

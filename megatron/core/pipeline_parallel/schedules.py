@@ -78,6 +78,8 @@ def get_forward_backward_func():
         transformer, this is the encoder's sequence length. This is ignored if variable_seq_lengths
         in the config is True. Otherwise, each microbatch in the current global batch size must use
         this sequence length.
+    
+    hidden_size (int, required): hidden size of the model
 
     micro_batch_size (int, required): The number of sequences in a microbatch.
 
@@ -287,6 +289,7 @@ def forward_backward_no_pipelining(
     model: Union[torch.nn.Module, List[torch.nn.Module]],
     num_microbatches: int,
     seq_length: int,  # unused
+    hidden_size: int, # unused
     micro_batch_size: int,  # unused
     decoder_seq_length: int = None,  # unused
     forward_only: bool = False,
@@ -370,8 +373,10 @@ def forward_backward_pipelining_with_interleaving(
     data_iterator: Union[Iterator, List[Iterator]],
     model: Union[torch.nn.Module, List[torch.nn.Module]],
     num_microbatches: int,
-    seq_length: int,
-    micro_batch_size: int,
+    seq_length: int = None,
+    hidden_size: int = None,
+    micro_batch_size: int = None,
+    input_shapes: list = None,
     decoder_seq_length: int = None,
     forward_only: bool = False,
     collect_non_loss_data: bool = False,
@@ -457,7 +462,7 @@ def forward_backward_pipelining_with_interleaving(
             "Interleaving is not supported with a different decoder sequence length."
         )
 
-    tensor_shape = [seq_length, micro_batch_size, config.hidden_size]
+    tensor_shape = [seq_length, micro_batch_size, hidden_size]
     if config.sequence_parallel:
         tensor_shape[0] = tensor_shape[0] // parallel_state.get_tensor_model_parallel_world_size()
 
@@ -944,6 +949,7 @@ def get_tensor_shapes(
     rank: int,
     model_type: ModelType,
     seq_length: int,
+    hidden_size: int,
     micro_batch_size: int,
     decoder_seq_length: int,
     config,
@@ -967,12 +973,12 @@ def get_tensor_shapes(
 
     if model_type == ModelType.encoder_and_decoder:
         if parallel_state.is_pipeline_stage_before_split(rank):
-            tensor_shapes.append((seq_length, micro_batch_size, config.hidden_size))
+            tensor_shapes.append((seq_length, micro_batch_size, hidden_size))
         else:
-            tensor_shapes.append((decoder_seq_length, micro_batch_size, config.hidden_size))
-            tensor_shapes.append((seq_length, micro_batch_size, config.hidden_size))
+            tensor_shapes.append((decoder_seq_length, micro_batch_size, hidden_size))
+            tensor_shapes.append((seq_length, micro_batch_size, hidden_size))
     else:
-        tensor_shapes.append((seq_length, micro_batch_size, config.hidden_size))
+        tensor_shapes.append((seq_length, micro_batch_size, hidden_size))
     return tensor_shapes
 
 
@@ -1050,8 +1056,10 @@ def forward_backward_pipelining_without_interleaving(
     data_iterator: Union[Iterator, List[Iterator]],
     model: Union[torch.nn.Module, List[torch.nn.Module]],
     num_microbatches: int,
-    seq_length: int,
-    micro_batch_size: int,
+    seq_length: int = None,
+    hidden_size: int = None,
+    micro_batch_size: int = None,
+    input_shapes: list = None,
     decoder_seq_length: int = None,
     forward_only: bool = False,
     collect_non_loss_data: bool = False,
@@ -1127,22 +1135,34 @@ def forward_backward_pipelining_without_interleaving(
     model_type = get_model_type(model)
 
     rank = parallel_state.get_pipeline_model_parallel_rank()
-    recv_tensor_shapes = get_tensor_shapes(
-        rank=rank - 1,
-        model_type=model_type,
-        seq_length=seq_length,
-        micro_batch_size=micro_batch_size,
-        decoder_seq_length=decoder_seq_length,
-        config=config,
-    )
-    send_tensor_shapes = get_tensor_shapes(
-        rank=rank,
-        model_type=model_type,
-        seq_length=seq_length,
-        micro_batch_size=micro_batch_size,
-        decoder_seq_length=decoder_seq_length,
-        config=config,
-    )
+
+    def get_recv_tensor_shapes(microbatch_id):
+        if input_shapes:
+            return [input_shapes[microbatch_id]]
+        recv_tensor_shapes = get_tensor_shapes(
+            rank=rank - 1,
+            model_type=model_type,
+            seq_length=seq_length,
+            hidden_size=hidden_size,
+            micro_batch_size=micro_batch_size,
+            decoder_seq_length=decoder_seq_length,
+            config=config,
+        )
+        return recv_tensor_shapes
+
+    def get_send_tensor_shapes(microbatch_id):
+        if input_shapes:
+            return [input_shapes[microbatch_id]]
+        send_tensor_shapes = get_tensor_shapes(
+            rank=rank,
+            model_type=model_type,
+            seq_length=seq_length,
+            hidden_size=hidden_size,
+            micro_batch_size=micro_batch_size,
+            decoder_seq_length=decoder_seq_length,
+            config=config,
+        )
+        return send_tensor_shapes
 
     # Input, output tensors only need to be saved when doing backward passes
     input_tensors = None
@@ -1163,7 +1183,12 @@ def forward_backward_pipelining_without_interleaving(
         else:
             checkpoint_activations_microbatch = None
 
+        # if torch.cuda.current_device() == 0 or torch.cuda.current_device() == 4:
+        #     print(f'rank {torch.cuda.current_device()}: micro batch {i}: warmup recv_forward begin...')
+        recv_tensor_shapes = get_recv_tensor_shapes(i)  # fwd recv shape
         input_tensor = recv_forward(recv_tensor_shapes, config)
+        # if torch.cuda.current_device() == 0 or torch.cuda.current_device() == 4:
+        #     print(f'rank {torch.cuda.current_device()}: micro batch {i}: warmup recv_forward end & forward begin...')
         output_tensor = forward_step(
             forward_step_func,
             data_iterator,
@@ -1175,7 +1200,13 @@ def forward_backward_pipelining_without_interleaving(
             collect_non_loss_data,
             checkpoint_activations_microbatch,
         )
+        # if torch.cuda.current_device() == 0 or torch.cuda.current_device() == 4:
+        #     print(f'rank {torch.cuda.current_device()}: output tensor shape = {output_tensor[0].shape}, send_tensor_shapes={send_tensor_shapes}')
+        #     print(f'rank {torch.cuda.current_device()}: micro batch {i}: warmup forward end & send_forward begin...')
+        send_tensor_shapes = get_send_tensor_shapes(i)  # fwd send shape
         send_forward(output_tensor, send_tensor_shapes, config)
+        # if torch.cuda.current_device() == 0 or torch.cuda.current_device() == 4:
+        #     print(f'rank {torch.cuda.current_device()}: micro batch {i}: warmup send_forward end...')        
 
         if not forward_only:
             input_tensors.append(input_tensor)
@@ -1186,11 +1217,16 @@ def forward_backward_pipelining_without_interleaving(
     # If all microbatches are run in warmup / cooldown phase, then no need to
     # receive this tensor here.
     if num_microbatches_remaining > 0:
-        input_tensor = recv_forward(recv_tensor_shapes, config)
+        # if torch.cuda.current_device() == 0 or torch.cuda.current_device() == 4:
+        #     print(f'rank {torch.cuda.current_device()}: micro batch {num_warmup_microbatches}: 1f1b recv_forward begin...')
+        recv_tensor_shapes = get_recv_tensor_shapes(num_warmup_microbatches)  # fwd recv shape
+        input_tensor = recv_forward(recv_tensor_shapes, config)      
 
     # Run 1F1B in steady state.
     for i in range(num_microbatches_remaining):
         last_iteration = i == (num_microbatches_remaining - 1)
+        next_forward_k = num_warmup_microbatches + i + 1
+        backward_k = i
 
         # Decide to checkpoint all layers' activations of the current micro-batch
         if max_outstanding_backprops is not None:
@@ -1199,7 +1235,8 @@ def forward_backward_pipelining_without_interleaving(
             ) >= config.num_microbatches_with_partial_activation_checkpoints
         else:
             checkpoint_activations_microbatch = None
-
+        # if torch.cuda.current_device() == 0 or torch.cuda.current_device() == 4:
+        #     print(f'rank {torch.cuda.current_device()}: micro batch {num_warmup_microbatches + i}: 1f1b recv_forward end & forward begin...') 
         output_tensor = forward_step(
             forward_step_func,
             data_iterator,
@@ -1213,12 +1250,23 @@ def forward_backward_pipelining_without_interleaving(
         )
 
         if forward_only:
+            # if torch.cuda.current_device() == 0 or torch.cuda.current_device() == 4:
+            #     print(f'rank {torch.cuda.current_device()}: micro batch {num_warmup_microbatches + i}: 1f1b forward end & send forward begin...') 
+            send_tensor_shapes = get_send_tensor_shapes(next_forward_k - 1)  # fwd send shape
             send_forward(output_tensor, send_tensor_shapes, config)
 
             if not last_iteration:
+                # if torch.cuda.current_device() == 0 or torch.cuda.current_device() == 4:
+                #     print(f'rank {torch.cuda.current_device()}: micro batch {num_warmup_microbatches + i}: 1f1b send forward end & recv forward begin...')
+                recv_tensor_shapes = get_recv_tensor_shapes(next_forward_k)  # fwd recv shape
                 input_tensor = recv_forward(recv_tensor_shapes, config)
+            else:
+                pass
+                # if torch.cuda.current_device() == 0 or torch.cuda.current_device() == 4:
+                #     print(f'rank {torch.cuda.current_device()}: micro batch {num_warmup_microbatches + i}: 1f1b send forward end...')                
 
         else:
+            send_tensor_shapes = get_send_tensor_shapes(backward_k)  # bwd recv shape
             output_tensor_grad = send_forward_recv_backward(
                 output_tensor, send_tensor_shapes, config
             )
@@ -1245,8 +1293,10 @@ def forward_backward_pipelining_without_interleaving(
 
             if last_iteration:
                 input_tensor = None
+                recv_tensor_shapes = get_recv_tensor_shapes(backward_k)  # bwd send shape
                 send_backward(input_tensor_grad, recv_tensor_shapes, config)
             else:
+                recv_tensor_shapes = get_recv_tensor_shapes(next_forward_k)  # fwd recv shape
                 input_tensor = send_backward_recv_forward(
                     input_tensor_grad, recv_tensor_shapes, config
                 )
@@ -1254,7 +1304,7 @@ def forward_backward_pipelining_without_interleaving(
     # Run cooldown backward passes.
     if not forward_only:
         for i in range(num_warmup_microbatches):
-
+            backward_k = num_microbatches_remaining + i
             # Enable async grad reduction in the last backward pass
             # Note: If grad sync function is provided, only enable
             # async grad reduction in first pipeline stage. Other
@@ -1267,12 +1317,14 @@ def forward_backward_pipelining_without_interleaving(
             input_tensor = input_tensors.pop(0)
             output_tensor = output_tensors.pop(0)
 
+            send_tensor_shapes = get_send_tensor_shapes(backward_k)  # bwd recv shape
             output_tensor_grad = recv_backward(send_tensor_shapes, config)
 
             input_tensor_grad = backward_step(
                 input_tensor, output_tensor, output_tensor_grad, model_type, config
             )
 
+            recv_tensor_shapes = get_recv_tensor_shapes(backward_k)  # bwd send shape
             send_backward(input_tensor_grad, recv_tensor_shapes, config)
 
         # Launch any remaining grad reductions.

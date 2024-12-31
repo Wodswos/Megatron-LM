@@ -59,6 +59,16 @@ def parse_args(extra_args_provider=None, ignore_unknown_args=False):
     return args
 
 def validate_args(args, defaults={}):
+    # Set input defaults.
+    for key in defaults:
+        if getattr(args, key, None) is not None:
+            if args.rank == 0 and defaults[key] != getattr(args, key):
+                print('WARNING: overriding default argument {key}:{v2} \
+                       with {key}:{v}'.format(key=key, v=defaults[key],
+                                              v2=getattr(args, key)),
+                      flush=True)
+
+        setattr(args, key, defaults[key])    
     # Tensor model parallel size.
     args.tensor_model_parallel_size = min(
         args.tensor_model_parallel_size, args.world_size)
@@ -125,19 +135,19 @@ def validate_args(args, defaults={}):
         args.recompute_granularity = 'selective'
     del args.recompute_activations
 
-    # Set input defaults.
-    for key in defaults:
-        # For default to be valid, it should not be provided in the
-        # arguments that are passed to the program. We check this by
-        # ensuring the arg is set to None.
-        if getattr(args, key, None) is not None:
-            if args.rank == 0:
-                print('WARNING: overriding default arguments for {key}:{v} \
-                       with {key}:{v2}'.format(key=key, v=defaults[key],
-                                               v2=getattr(args, key)),
-                                               flush=True)
-        else:
-            setattr(args, key, defaults[key])
+    # # Set input defaults.
+    # for key in defaults:
+    #     # For default to be valid, it should not be provided in the
+    #     # arguments that are passed to the program. We check this by
+    #     # ensuring the arg is set to None.
+    #     if getattr(args, key, None) is not None:
+    #         if args.rank == 0:
+    #             print('WARNING: overriding default arguments for {key}:{v} \
+    #                    with {key}:{v2}'.format(key=key, v=defaults[key],
+    #                                            v2=getattr(args, key)),
+    #                                            flush=True)
+    #     else:
+    #         setattr(args, key, defaults[key])
 
     # Batch size.
     assert args.micro_batch_size is not None

@@ -366,7 +366,7 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
 
     def __init__(self, optimizer, clip_grad, log_num_zeros_in_grad,
                  check_for_nan_in_grad, params_have_main_grad, fp16,
-                 bf16, params_dtype, grad_scaler, models):
+                 bf16, params_dtype, grad_scaler, models, overlap_param_gather=False):
         """
         See top of class definition for argument descriptions.
 
@@ -382,8 +382,11 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
             check_for_nan_in_grad, params_have_main_grad,
             fp16, bf16, params_dtype, grad_scaler, models)
 
-        assert isinstance(optimizer, Adam), \
-            "Only Adam currently supported, due to checkpointing requirements."
+        # assert isinstance(optimizer, Adam), \
+        #     "Only Adam currently supported, due to checkpointing requirements."
+
+        if not isinstance(optimizer, Adam):
+            print("WARNING: the optimizer type is not Adam, and now Only Adam currently support checkpointing requirements!")
 
         # Model grad buffer ranges.
         self.model_gbuf_ranges = []
@@ -476,7 +479,7 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
             self.param_buffer_copied.append(False)
         self.num_all_gather_handles = len(self.all_gather_handle_index_to_bucket_index_map)
 
-        self.overlap_param_gather = get_args().overlap_param_gather
+        self.overlap_param_gather = overlap_param_gather
         if self.overlap_param_gather:
             self.remove_pre_hook_handle = torch.nn.modules.module.register_module_forward_pre_hook(
                 self._make_forward_pre_hook())

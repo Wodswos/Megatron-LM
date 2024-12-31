@@ -39,7 +39,7 @@ def initialize_megatron(
     if not allow_no_cuda:
         # Make sure cuda is available.
         assert torch.cuda.is_available(), "Megatron requires CUDA."
-
+    print('use open-source megatron initialize...')
     # Parse arguments
     args = parse_args(extra_args_provider, ignore_unknown_args)
 
